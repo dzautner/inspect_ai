@@ -1,42 +1,57 @@
 """Sequence-numbered output delivery for reliable output transport.
 
-Manages held data and sequence counter so that output drained from buffers
+Manages held chunks and sequence counter so that output drained from buffers
 is not lost if an RPC response fails to reach the host.
 """
 
-from collections.abc import Sequence
 
+class SequencedDelivery[T]:
+    """Track held chunks and sequence numbers for reliable delivery.
 
-class SequencedDelivery:
-    """Track held output and sequence numbers for reliable delivery.
+    Two-step usage per RPC round-trip:
 
-    The host sends ``ack_seq`` on every RPC to confirm receipt of the
-    previous response.  When ``ack_seq >= _seq``, held data is discarded.
-    Otherwise held data is prepended to the next response.
+    1. ``push(chunk)`` — record new output.
+    2. ``collect(ack_seq)`` — discard chunks the host has confirmed,
+       return everything still unacked with the current seq.
+
+    Example — normal flow::
+
+        sd = SequencedDelivery[str]()
+
+        sd.push("A")
+        seq, chunks = sd.collect(0)  # seq=1, chunks=["A"]
+
+        sd.push("B")
+        seq, chunks = sd.collect(1)  # seq=2, chunks=["B"]
+
+    Example — retransmit (response lost)::
+
+        sd = SequencedDelivery[str]()
+
+        sd.push("A")
+        sd.collect(0)                # seq=1, ["A"] — response lost
+
+        sd.push("B")
+        seq, chunks = sd.collect(0)  # seq=2, ["A", "B"]
     """
 
-    def __init__(self, fields: Sequence[str]) -> None:
+    def __init__(self) -> None:
         self._seq: int = 0
-        self._held: dict[str, str] = {f: "" for f in fields}
+        self._held: list[tuple[int, T]] = []  # (seq, chunk) pairs
 
-    def deliver(
-        self, ack_seq: int, data: dict[str, str]
-    ) -> tuple[int, dict[str, str]]:
-        """Accept fresh data, combine with any unacked held data.
+    def push(self, chunk: T) -> None:
+        """Append a chunk."""
+        self._seq += 1
+        self._held.append((self._seq, chunk))
+
+    def collect(self, ack_seq: int) -> tuple[int, list[T]]:
+        """Discard acked chunks and return the current seq plus what's left.
 
         Args:
             ack_seq: Host's last successfully received seq (0 = nothing received).
-            data: Freshly drained output keyed by field name.
 
         Returns:
-            ``(new_seq, combined_data)`` for the response.
+            ``(seq, chunks)`` — current sequence number and copy of unacked chunks.
         """
-        if ack_seq >= self._seq:
-            self._held = {f: "" for f in self._held}
-
-        combined = {f: self._held[f] + data.get(f, "") for f in self._held}
-
-        self._seq += 1
-        self._held = combined
-
-        return (self._seq, combined)
+        self._held = [(s, c) for s, c in self._held if s > ack_seq]
+        return (self._seq, [c for _, c in self._held])

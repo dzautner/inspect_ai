@@ -84,7 +84,7 @@ class Job:
         self._stderr_output = DecodingBuffer(self._stderr_buffer)
         self._state: Literal["running", "completed", "killed"] = "running"
         self._exit_code: int | None = None
-        self._sequenced = SequencedDelivery(["stdout", "stderr"])
+        self._sequenced: SequencedDelivery[tuple[str, str]] = SequencedDelivery()
 
         # Start background read tasks
         self._stdout_task = asyncio.create_task(
@@ -130,16 +130,16 @@ class Job:
             reported_state = self._state
             reported_exit_code = self._exit_code
 
-        seq, combined = self._sequenced.deliver(
-            ack_seq, {"stdout": stdout, "stderr": stderr}
-        )
+        self._sequenced.push((stdout, stderr))
+        seq, chunks = self._sequenced.collect(ack_seq)
+        combined_out, combined_err = self._combine_chunks(chunks)
 
         return PollResult(
             state=reported_state,
             exit_code=reported_exit_code,
             seq=seq,
-            stdout=combined["stdout"],
-            stderr=combined["stderr"],
+            stdout=combined_out,
+            stderr=combined_err,
         )
 
     async def kill(self, ack_seq: int, timeout: int = 5) -> tuple[int, str, str]:
@@ -153,10 +153,9 @@ class Job:
             A tuple of (seq, stdout, stderr).
         """
         if self._state != "running":
-            seq, combined = self._sequenced.deliver(
-                ack_seq, {"stdout": "", "stderr": ""}
-            )
-            return (seq, combined["stdout"], combined["stderr"])
+            self._sequenced.push(("", ""))
+            seq, chunks = self._sequenced.collect(ack_seq)
+            return (seq, *self._combine_chunks(chunks))
 
         self._state = "killed"
         pgid = self._process.pid
@@ -177,10 +176,9 @@ class Job:
         await self._wait_for_readers()
 
         stdout, stderr = self._drain_buffers(final=True)
-        seq, combined = self._sequenced.deliver(
-            ack_seq, {"stdout": stdout, "stderr": stderr}
-        )
-        return (seq, combined["stdout"], combined["stderr"])
+        self._sequenced.push((stdout, stderr))
+        seq, chunks = self._sequenced.collect(ack_seq)
+        return (seq, *self._combine_chunks(chunks))
 
     def _drain_buffers(
         self, final: bool = False, max_bytes: int | None = None
@@ -222,10 +220,9 @@ class Job:
         self._process.stdin.write(data.encode("utf-8"))
         await self._process.stdin.drain()
         stdout, stderr = self._drain_buffers()
-        seq, combined = self._sequenced.deliver(
-            ack_seq, {"stdout": stdout, "stderr": stderr}
-        )
-        return (seq, combined["stdout"], combined["stderr"])
+        self._sequenced.push((stdout, stderr))
+        seq, chunks = self._sequenced.collect(ack_seq)
+        return (seq, *self._combine_chunks(chunks))
 
     async def close_stdin(self, ack_seq: int) -> tuple[int, str, str]:
         """Close the process's stdin pipe to signal EOF and return buffered output.
@@ -249,10 +246,17 @@ class Job:
             await self._process.stdin.wait_closed()
             stdout, stderr = self._drain_buffers()
 
-        seq, combined = self._sequenced.deliver(
-            ack_seq, {"stdout": stdout, "stderr": stderr}
+        self._sequenced.push((stdout, stderr))
+        seq, chunks = self._sequenced.collect(ack_seq)
+        return (seq, *self._combine_chunks(chunks))
+
+    @staticmethod
+    def _combine_chunks(chunks: list[tuple[str, str]]) -> tuple[str, str]:
+        """Concatenate a list of (stdout, stderr) chunks."""
+        return (
+            "".join(c[0] for c in chunks),
+            "".join(c[1] for c in chunks),
         )
-        return (seq, combined["stdout"], combined["stderr"])
 
     async def cleanup(self) -> None:
         """Clean up resources. Called after job is removed from controller."""
