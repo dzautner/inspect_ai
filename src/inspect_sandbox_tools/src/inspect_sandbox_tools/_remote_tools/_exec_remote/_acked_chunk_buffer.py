@@ -17,20 +17,16 @@ class AckedChunkBuffer[T]:
     Example — normal flow::
 
         sd = AckedChunkBuffer[str]()
-
         sd.push("A")
         seq, chunks = sd.collect(0)  # seq=1, chunks=["A"]
-
         sd.push("B")
         seq, chunks = sd.collect(1)  # seq=2, chunks=["B"]
 
     Example — retransmit (response lost)::
 
         sd = AckedChunkBuffer[str]()
-
         sd.push("A")
         sd.collect(0)                # seq=1, ["A"] — response lost
-
         sd.push("B")
         seq, chunks = sd.collect(0)  # seq=2, ["A", "B"]
     """
