@@ -7,6 +7,7 @@ from typing import Literal
 from inspect_sandbox_tools._util.common_types import ToolException
 
 from ._output_buffer import BoundedByteBuffer, DecodingBuffer
+from ._sequenced_delivery import SequencedDelivery
 from .tool_types import PollResult
 
 _BACKPRESSURE_BUFFER_SIZE = 100 * 1024 * 1024  # 100 MiB
@@ -83,6 +84,7 @@ class Job:
         self._stderr_output = DecodingBuffer(self._stderr_buffer)
         self._state: Literal["running", "completed", "killed"] = "running"
         self._exit_code: int | None = None
+        self._sequenced = SequencedDelivery(["stdout", "stderr"])
 
         # Start background read tasks
         self._stdout_task = asyncio.create_task(
@@ -98,7 +100,7 @@ class Job:
         assert self._process.pid is not None
         return self._process.pid
 
-    async def poll(self) -> PollResult:
+    async def poll(self, ack_seq: int) -> PollResult:
         """Return current state and incremental output, clearing buffers."""
         # Check if process has finished
         if self._state == "running" and self._process.returncode is not None:
@@ -128,14 +130,19 @@ class Job:
             reported_state = self._state
             reported_exit_code = self._exit_code
 
+        seq, combined = self._sequenced.deliver(
+            ack_seq, {"stdout": stdout, "stderr": stderr}
+        )
+
         return PollResult(
             state=reported_state,
             exit_code=reported_exit_code,
-            stdout=stdout,
-            stderr=stderr,
+            seq=seq,
+            stdout=combined["stdout"],
+            stderr=combined["stderr"],
         )
 
-    async def kill(self, timeout: int = 5) -> tuple[str, str]:
+    async def kill(self, ack_seq: int, timeout: int = 5) -> tuple[int, str, str]:
         """Terminate the process and return any remaining buffered output.
 
         Since the subprocess was started with start_new_session=True, it is the
@@ -143,11 +150,13 @@ class Job:
         the entire group, ensuring child processes are also terminated.
 
         Returns:
-            A tuple of (stdout, stderr) containing any output buffered since
-            the last poll.
+            A tuple of (seq, stdout, stderr).
         """
         if self._state != "running":
-            return ("", "")
+            seq, combined = self._sequenced.deliver(
+                ack_seq, {"stdout": "", "stderr": ""}
+            )
+            return (seq, combined["stdout"], combined["stderr"])
 
         self._state = "killed"
         pgid = self._process.pid
@@ -167,7 +176,11 @@ class Job:
 
         await self._wait_for_readers()
 
-        return self._drain_buffers(final=True)
+        stdout, stderr = self._drain_buffers(final=True)
+        seq, combined = self._sequenced.deliver(
+            ack_seq, {"stdout": stdout, "stderr": stderr}
+        )
+        return (seq, combined["stdout"], combined["stderr"])
 
     def _drain_buffers(
         self, final: bool = False, max_bytes: int | None = None
@@ -188,11 +201,11 @@ class Job:
             self._stderr_output.drain(final, max_bytes),
         )
 
-    async def write_stdin(self, data: str) -> tuple[str, str]:
+    async def write_stdin(self, data: str, ack_seq: int) -> tuple[int, str, str]:
         """Write data to the process's stdin and return buffered output.
 
         Returns:
-            A tuple of (stdout, stderr) accumulated since the last read.
+            A tuple of (seq, stdout, stderr).
 
         Raises:
             ToolException: If stdin is not available or already closed.
@@ -208,15 +221,19 @@ class Job:
 
         self._process.stdin.write(data.encode("utf-8"))
         await self._process.stdin.drain()
-        return self._drain_buffers()
+        stdout, stderr = self._drain_buffers()
+        seq, combined = self._sequenced.deliver(
+            ack_seq, {"stdout": stdout, "stderr": stderr}
+        )
+        return (seq, combined["stdout"], combined["stderr"])
 
-    async def close_stdin(self) -> tuple[str, str]:
+    async def close_stdin(self, ack_seq: int) -> tuple[int, str, str]:
         """Close the process's stdin pipe to signal EOF and return buffered output.
 
         This is idempotent — calling it when stdin is already closed is a no-op.
 
         Returns:
-            A tuple of (stdout, stderr) accumulated since the last read.
+            A tuple of (seq, stdout, stderr).
 
         Raises:
             ToolException: If stdin is not available.
@@ -226,11 +243,16 @@ class Job:
                 "stdin is not available (process started without stdin_open=True)"
             )
         if self._process.stdin.is_closing():
-            return self._drain_buffers()
+            stdout, stderr = self._drain_buffers()
+        else:
+            self._process.stdin.close()
+            await self._process.stdin.wait_closed()
+            stdout, stderr = self._drain_buffers()
 
-        self._process.stdin.close()
-        await self._process.stdin.wait_closed()
-        return self._drain_buffers()
+        seq, combined = self._sequenced.deliver(
+            ack_seq, {"stdout": stdout, "stderr": stderr}
+        )
+        return (seq, combined["stdout"], combined["stderr"])
 
     async def cleanup(self) -> None:
         """Clean up resources. Called after job is removed from controller."""
