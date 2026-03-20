@@ -1,11 +1,11 @@
-"""Sequence-numbered output delivery for reliable output transport.
+"""Ack-gated chunk buffer for reliable output transport.
 
-Manages held chunks and sequence counter so that output drained from buffers
-is not lost if an RPC response fails to reach the host.
+Holds output chunks until the host confirms receipt, preventing data loss
+when RPC responses are lost in transit.
 """
 
 
-class SequencedDelivery[T]:
+class AckedChunkBuffer[T]:
     """Track held chunks and sequence numbers for reliable delivery.
 
     Two-step usage per RPC round-trip:
@@ -16,7 +16,7 @@ class SequencedDelivery[T]:
 
     Example — normal flow::
 
-        sd = SequencedDelivery[str]()
+        sd = AckedChunkBuffer[str]()
 
         sd.push("A")
         seq, chunks = sd.collect(0)  # seq=1, chunks=["A"]
@@ -26,7 +26,7 @@ class SequencedDelivery[T]:
 
     Example — retransmit (response lost)::
 
-        sd = SequencedDelivery[str]()
+        sd = AckedChunkBuffer[str]()
 
         sd.push("A")
         sd.collect(0)                # seq=1, ["A"] — response lost

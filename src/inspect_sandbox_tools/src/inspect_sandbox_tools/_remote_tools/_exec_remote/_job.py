@@ -6,8 +6,8 @@ from typing import Literal
 
 from inspect_sandbox_tools._util.common_types import ToolException
 
+from ._acked_chunk_buffer import AckedChunkBuffer
 from ._output_buffer import BoundedByteBuffer, DecodingBuffer
-from ._sequenced_delivery import SequencedDelivery
 from .tool_types import PollResult
 
 _BACKPRESSURE_BUFFER_SIZE = 100 * 1024 * 1024  # 100 MiB
@@ -84,7 +84,7 @@ class Job:
         self._stderr_output = DecodingBuffer(self._stderr_buffer)
         self._state: Literal["running", "completed", "killed"] = "running"
         self._exit_code: int | None = None
-        self._sequenced: SequencedDelivery[tuple[str, str]] = SequencedDelivery()
+        self._acked_buffer: AckedChunkBuffer[tuple[str, str]] = AckedChunkBuffer()
 
         # Start background read tasks
         self._stdout_task = asyncio.create_task(
@@ -130,8 +130,8 @@ class Job:
             reported_state = self._state
             reported_exit_code = self._exit_code
 
-        self._sequenced.push((stdout, stderr))
-        seq, chunks = self._sequenced.collect(ack_seq)
+        self._acked_buffer.push((stdout, stderr))
+        seq, chunks = self._acked_buffer.collect(ack_seq)
         combined_out, combined_err = self._combine_chunks(chunks)
 
         return PollResult(
@@ -153,8 +153,8 @@ class Job:
             A tuple of (seq, stdout, stderr).
         """
         if self._state != "running":
-            self._sequenced.push(("", ""))
-            seq, chunks = self._sequenced.collect(ack_seq)
+            self._acked_buffer.push(("", ""))
+            seq, chunks = self._acked_buffer.collect(ack_seq)
             return (seq, *self._combine_chunks(chunks))
 
         self._state = "killed"
@@ -176,8 +176,8 @@ class Job:
         await self._wait_for_readers()
 
         stdout, stderr = self._drain_buffers(final=True)
-        self._sequenced.push((stdout, stderr))
-        seq, chunks = self._sequenced.collect(ack_seq)
+        self._acked_buffer.push((stdout, stderr))
+        seq, chunks = self._acked_buffer.collect(ack_seq)
         return (seq, *self._combine_chunks(chunks))
 
     def _drain_buffers(
@@ -220,8 +220,8 @@ class Job:
         self._process.stdin.write(data.encode("utf-8"))
         await self._process.stdin.drain()
         stdout, stderr = self._drain_buffers()
-        self._sequenced.push((stdout, stderr))
-        seq, chunks = self._sequenced.collect(ack_seq)
+        self._acked_buffer.push((stdout, stderr))
+        seq, chunks = self._acked_buffer.collect(ack_seq)
         return (seq, *self._combine_chunks(chunks))
 
     async def close_stdin(self, ack_seq: int) -> tuple[int, str, str]:
@@ -246,8 +246,8 @@ class Job:
             await self._process.stdin.wait_closed()
             stdout, stderr = self._drain_buffers()
 
-        self._sequenced.push((stdout, stderr))
-        seq, chunks = self._sequenced.collect(ack_seq)
+        self._acked_buffer.push((stdout, stderr))
+        seq, chunks = self._acked_buffer.collect(ack_seq)
         return (seq, *self._combine_chunks(chunks))
 
     @staticmethod

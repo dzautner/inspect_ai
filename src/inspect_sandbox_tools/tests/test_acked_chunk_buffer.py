@@ -1,12 +1,12 @@
-"""Tests for SequencedDelivery — pure logic, no async, no mocks."""
+"""Tests for AckedChunkBuffer — pure logic, no async, no mocks."""
 
-from inspect_sandbox_tools._remote_tools._exec_remote._sequenced_delivery import (
-    SequencedDelivery,
+from inspect_sandbox_tools._remote_tools._exec_remote._acked_chunk_buffer import (
+    AckedChunkBuffer,
 )
 
 
 def test_first_delivery() -> None:
-    sd = SequencedDelivery[str]()
+    sd = AckedChunkBuffer[str]()
     sd.push("A")
     seq, chunks = sd.collect(0)
     assert seq == 1
@@ -14,7 +14,7 @@ def test_first_delivery() -> None:
 
 
 def test_normal_ack_flow() -> None:
-    sd = SequencedDelivery[str]()
+    sd = AckedChunkBuffer[str]()
 
     sd.push("A")
     seq1, chunks1 = sd.collect(0)
@@ -29,7 +29,7 @@ def test_normal_ack_flow() -> None:
 
 
 def test_retransmit_prepends_held() -> None:
-    sd = SequencedDelivery[str]()
+    sd = AckedChunkBuffer[str]()
 
     sd.push("A")
     seq1, _ = sd.collect(0)
@@ -43,7 +43,7 @@ def test_retransmit_prepends_held() -> None:
 
 
 def test_multiple_retransmits_accumulate() -> None:
-    sd = SequencedDelivery[str]()
+    sd = AckedChunkBuffer[str]()
 
     sd.push("A")
     sd.collect(0)   # seq=1
@@ -58,7 +58,7 @@ def test_multiple_retransmits_accumulate() -> None:
 
 
 def test_empty_chunk_on_retransmit() -> None:
-    sd = SequencedDelivery[str]()
+    sd = AckedChunkBuffer[str]()
 
     sd.push("data")
     sd.collect(0)  # seq=1
@@ -71,7 +71,7 @@ def test_empty_chunk_on_retransmit() -> None:
 
 def test_ack_seq_greater_than_seq_clears_all() -> None:
     """Defensive: ack_seq > _seq discards everything (future ack)."""
-    sd = SequencedDelivery[str]()
+    sd = AckedChunkBuffer[str]()
 
     sd.push("A")
     sd.collect(0)  # seq=1
@@ -85,7 +85,7 @@ def test_ack_seq_greater_than_seq_clears_all() -> None:
 
 def test_tuple_chunks() -> None:
     """Works with tuple chunks (e.g. stdout/stderr pairs)."""
-    sd = SequencedDelivery[tuple[str, str]]()
+    sd = AckedChunkBuffer[tuple[str, str]]()
 
     sd.push(("out1", "err1"))
     seq, chunks = sd.collect(0)
@@ -101,7 +101,7 @@ def test_tuple_chunks() -> None:
 
 def test_dict_chunks() -> None:
     """Works with dict chunks."""
-    sd = SequencedDelivery[dict[str, int]]()
+    sd = AckedChunkBuffer[dict[str, int]]()
     sd.push({"a": 1})
     seq, chunks = sd.collect(0)
     assert seq == 1
@@ -110,7 +110,7 @@ def test_dict_chunks() -> None:
 
 def test_ack_then_retransmit_then_ack() -> None:
     """Full cycle: normal -> lost -> retransmit -> ack."""
-    sd = SequencedDelivery[str]()
+    sd = AckedChunkBuffer[str]()
 
     # Normal
     sd.push("A")
@@ -132,7 +132,7 @@ def test_ack_then_retransmit_then_ack() -> None:
 
 def test_returned_list_is_a_copy() -> None:
     """Returned chunks list should be independent of internal state."""
-    sd = SequencedDelivery[str]()
+    sd = AckedChunkBuffer[str]()
     sd.push("A")
     _, chunks = sd.collect(0)
     chunks.append("mutated")
